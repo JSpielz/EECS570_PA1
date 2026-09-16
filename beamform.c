@@ -12,6 +12,60 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <immintrin.h>
+#include <pthread.h>
+
+const int NUM_THREADS = 36;
+const int SIMD_FLOATS = 256 / sizeof(float)*8;
+
+typedef struct calc_tx_args {
+    int iterations;
+	int point;
+    float *point_x;
+    float *point_y;
+	float *point_z;
+	__m256 tx_x_vec;
+	__m256 tx_y_vec;
+	__m256 tx_z_vec;
+	float *dist_tx;
+} calc_tx_args;
+
+void *calc_tx_dis(void *arg) {
+
+	calc_tx_args *args = (calc_tx_args *)arg;
+
+	for (int i = 0; i < args->iterations; i+=8) {
+		printf("processing block: %d", args->point);
+
+		// Load all values (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
+		__m256 point_x_vec = _mm256_loadu_ps(&args->point_x[args->point]);
+		__m256 point_y_vec = _mm256_loadu_ps(&args->point_y[args->point]);
+		__m256 point_z_vec = _mm256_loadu_ps(&args->point_z[args->point]);
+		
+		// Do the subtraction
+		__m256 x_comp_vec = _mm256_sub_ps(args->tx_x_vec, point_x_vec);
+		__m256 y_comp_vec = _mm256_sub_ps(args->tx_y_vec, point_y_vec);
+		__m256 z_comp_vec = _mm256_sub_ps(args->tx_z_vec, point_z_vec);
+
+		// Square it
+		__m256 x_comp_vec_sq = _mm256_mul_ps(x_comp_vec, x_comp_vec);
+		__m256 y_comp_vec_sq = _mm256_mul_ps(y_comp_vec, y_comp_vec);
+		__m256 z_comp_vec_sq = _mm256_mul_ps(z_comp_vec, z_comp_vec);
+
+		// Sum all XYZ sq
+		__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(x_comp_vec_sq, y_comp_vec_sq), z_comp_vec_sq);
+		
+		// Sqrt them
+		__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
+		
+		// Store them (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
+		_mm256_storeu_ps(&args->dist_tx[args->point], sqrt_vec);
+
+		// Increment by 8
+		args->point += 8;
+	}
+
+	pthread_exit(NULL);
+}
 
 int main (int argc, char **argv) {
 
@@ -135,38 +189,51 @@ int main (int argc, char **argv) {
 	__m256 tx_x_vec = _mm256_set1_ps(tx_x);
 	__m256 tx_y_vec = _mm256_set1_ps(tx_y);
 	__m256 tx_z_vec = _mm256_set1_ps(tx_z);
-	for (it_t = 0; it_t < sls_t; it_t++) {
-		for (it_p = 0; it_p < sls_p; it_p++) {
-			for (it_r = 0; it_r < pts_r; it_r+=8) { // pts_r always div by 8 (1560 / 8 = 195) 
-				// Load all values (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
-				__m256 point_x_vec = _mm256_loadu_ps(&point_x[point]);
-				__m256 point_y_vec = _mm256_loadu_ps(&point_y[point]);
-				__m256 point_z_vec = _mm256_loadu_ps(&point_z[point]);
-				
-				// Do the subtraction
-				__m256 x_comp_vec = _mm256_sub_ps(tx_x_vec, point_x_vec);
-				__m256 y_comp_vec = _mm256_sub_ps(tx_y_vec, point_y_vec);
-				__m256 z_comp_vec = _mm256_sub_ps(tx_z_vec, point_z_vec);
 
-				// Square it
-				__m256 x_comp_vec_sq = _mm256_mul_ps(x_comp_vec, x_comp_vec);
-				__m256 y_comp_vec_sq = _mm256_mul_ps(y_comp_vec, y_comp_vec);
-				__m256 z_comp_vec_sq = _mm256_mul_ps(z_comp_vec, z_comp_vec);
+	int total_points = sls_t * sls_p * pts_r;
+	int total_simd_blocks = total_simd_blocks / 8;
 
-				// Sum all XYZ sq
-				__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(x_comp_vec_sq, y_comp_vec_sq), z_comp_vec_sq);
-				
-				// Sqrt them
-				__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
-				
-				// Store them (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
-				_mm256_storeu_ps(&dist_tx[point], sqrt_vec);
+	int blocks_per_thread = total_simd_blocks / NUM_THREADS;
+	int remainder_blocks = total_simd_blocks % NUM_THREADS;
 
-				// Increment by 8
-				point += 8;
-			}
+	int start_block = 0;
+
+	pthread_t threads[NUM_THREADS];
+	calc_tx_args args[NUM_THREADS];
+	int rc;
+
+	for (int t = 0; t < NUM_THREADS; t++) {
+
+		int blocks_to_process = blocks_per_thread;
+		// split remainders among lower threads
+		if (t < remainder_blocks) {
+			blocks_to_process++;
 		}
+		
+		args[t].dist_tx = dist_tx;
+		args[t].point_x = point_x;
+		args[t].point_y = point_y;
+		args[t].point_z = point_z;
+		args[t].tx_x_vec = tx_x_vec;
+		args[t].tx_y_vec = tx_y_vec;
+		args[t].tx_z_vec = tx_z_vec;
+
+		args[t].iterations = blocks_to_process*SIMD_FLOATS;
+		args[t].point = start_block*SIMD_FLOATS; // calculates where this thread starts
+
+		start_block += blocks_to_process;
+
+		rc = pthread_create(&threads[t], NULL, calc_tx_dis, (void *)&args[t]);
+		if (rc) {
+			printf("ERROR; return code from pthread_create() is %d\n", rc);
+			exit(-1);
+      	}
 	}
+
+	for (int t = 0; t < NUM_THREADS; t++) {
+    	pthread_join(threads[t], NULL);
+	}
+
 
 	/* Now compute reflected distance, find index values, add to image */
 	int xy_size = trans_x * trans_y;
@@ -221,7 +288,7 @@ int main (int argc, char **argv) {
 						filter_delay_vec), 
 						half_vec
 					)); // then convert to integer vector
-					
+
 					// *image_pos++ += rx_data[index+offset];
 					__m256i idx_plus_offst = _mm256_add_epi32(indicies, offset_vec);
 
@@ -229,7 +296,7 @@ int main (int argc, char **argv) {
 					__m256 rx_data_vec = _mm256_i32gather_ps(
 						rx_data,
 						idx_plus_offst,
-						4                   // sizeof(float)
+						4 // sizeof(float)
 					);
 
 					__m256 image_pos_vec = _mm256_loadu_ps(image_pos);
@@ -284,5 +351,8 @@ int main (int argc, char **argv) {
 	free(dist_tx);
 	free(image);
 
+	pthread_exit(NULL);
+
 	return 0;
+
 }
