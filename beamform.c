@@ -210,13 +210,12 @@ int main (int argc, char **argv) {
 	int rc;
 
 	for (int t = 0; t < NUM_THREADS; t++) {
-
 		int blocks_to_process = blocks_per_thread;
 		// split remainders among lower threads
 		if (t < remainder_blocks) {
 			blocks_to_process++;
 		}
-		
+
 		args[t].dist_tx = dist_tx;
 		args[t].point_x = point_x;
 		args[t].point_y = point_y;
@@ -224,7 +223,6 @@ int main (int argc, char **argv) {
 		args[t].tx_x_vec = tx_x_vec;
 		args[t].tx_y_vec = tx_y_vec;
 		args[t].tx_z_vec = tx_z_vec;
-
 		args[t].iterations = blocks_to_process*SIMD_FLOATS;
 		args[t].point = start_block*SIMD_FLOATS; // calculates where this thread starts
 
@@ -244,11 +242,22 @@ int main (int argc, char **argv) {
 
 
 	/* Now compute reflected distance, find index values, add to image */
-	int xy_size = trans_x * trans_y;
+
 	__m256 idx_const_vec = _mm256_set1_ps(idx_const);
 	__m256 filter_delay_vec = _mm256_set1_ps(filter_delay);
 	__m256 half_vec = _mm256_set1_ps(0.5f);
+	__m256 rx_z_vec = _mm256_set1_ps(rx_z);
 
+	total_points = trans_x * trans_y * sls_t * sls_p * pts_r;
+	total_simd_blocks = total_points / 8;
+
+	blocks_per_thread = total_simd_blocks / NUM_THREADS;
+	remainder_blocks = total_simd_blocks % NUM_THREADS;
+
+	start_block = 0;
+
+	int xy_size = trans_x * trans_y;
+	// params: image, rx_x, rx_y, it_rx. 
 	for (it_rx = 0; it_rx < xy_size; it_rx++) {
 
 		image_pos = image; // Reset image pointer back to beginning
@@ -256,7 +265,6 @@ int main (int argc, char **argv) {
 
 		__m256 rx_x_vec = _mm256_set1_ps(rx_x[it_rx]);
 		__m256 rx_y_vec = _mm256_set1_ps(rx_y[it_rx]);
-		__m256 rx_z_vec = _mm256_set1_ps(rx_z);
 		__m256i offset_vec = _mm256_set1_epi32(offset); //they're integers 
 
 		// Iterate over entire image space
