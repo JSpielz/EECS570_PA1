@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <immintrin.h>
 
 int main (int argc, char **argv) {
 
@@ -131,19 +132,38 @@ int main (int argc, char **argv) {
 	/* --------------------------- COMPUTATION ------------------------------ */
 	/* First compute transmit distance */
 	point = 0;
+	__m256 tx_x_vec = _mm256_set1_ps(tx_x);
+	__m256 tx_y_vec = _mm256_set1_ps(tx_y);
+	__m256 tx_z_vec = _mm256_set1_ps(tx_z);
 	for (it_t = 0; it_t < sls_t; it_t++) {
-
 		for (it_p = 0; it_p < sls_p; it_p++) {
-			for (it_r = 0; it_r < pts_r; it_r++) {
+			for (it_r = 0; it_r < pts_r; it_r+=8) { // pts_r always div by 8 (1560 / 8 = 195) 
+				// Load all values (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
+				__m256 point_x_vec = _mm256_loadu_ps(&point_x[point]);
+				__m256 point_y_vec = _mm256_loadu_ps(&point_y[point]);
+				__m256 point_z_vec = _mm256_loadu_ps(&point_z[point]);
+				
+				// Do the subtraction
+				__m256 x_comp_vec = _mm256_sub_ps(tx_x_vec, point_x_vec);
+				__m256 y_comp_vec = _mm256_sub_ps(tx_y_vec, point_y_vec);
+				__m256 z_comp_vec = _mm256_sub_ps(tx_z_vec, point_z_vec);
 
-				x_comp = tx_x - point_x[point];
-				x_comp = x_comp * x_comp;
-				y_comp = tx_y - point_y[point];
-				y_comp = y_comp * y_comp;
-				z_comp = tx_z - point_z[point];
-				z_comp = z_comp * z_comp;
+				// Square it
+				__m256 x_comp_vec_sq = _mm256_mul_ps(x_comp_vec, x_comp_vec);
+				__m256 y_comp_vec_sq = _mm256_mul_ps(y_comp_vec, y_comp_vec);
+				__m256 z_comp_vec_sq = _mm256_mul_ps(z_comp_vec, z_comp_vec);
 
-				dist_tx[point++] = (float)sqrt(x_comp + y_comp + z_comp);
+				// Sum all XYZ sq
+				__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(x_comp_vec_sq, y_comp_vec_sq), z_comp_vec_sq);
+				
+				// Sqrt them
+				__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
+				
+				// Store them (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
+				_mm256_storeu_ps(dist_tx, sqrt_vec);
+
+				// Increment by 8
+				point += 8;
 			}
 		}
 	}
