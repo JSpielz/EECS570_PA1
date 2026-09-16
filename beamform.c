@@ -160,7 +160,7 @@ int main (int argc, char **argv) {
 				__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
 				
 				// Store them (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
-				_mm256_storeu_ps(dist_tx, sqrt_vec);
+				_mm256_storeu_ps(&dist_tx[point], sqrt_vec);
 
 				// Increment by 8
 				point += 8;
