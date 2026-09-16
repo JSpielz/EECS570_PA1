@@ -15,7 +15,7 @@
 #include <pthread.h>
 
 const int NUM_THREADS = 36;
-const int SIMD_FLOATS = 256 / sizeof(float)*8;
+const int SIMD_FLOATS = (sizeof(__m256) / sizeof(float));
 
 typedef struct calc_tx_args {
     int iterations;
@@ -34,8 +34,7 @@ void *calc_tx_dis(void *arg) {
 	calc_tx_args *args = (calc_tx_args *)arg;
 
 	for (int i = 0; i < args->iterations; i+=8) {
-		printf("processing block: %d", args->point);
-
+		// Do load sub mul on 1 thread?
 		// Load all values (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
 		__m256 point_x_vec = _mm256_loadu_ps(&args->point_x[args->point]);
 		__m256 point_y_vec = _mm256_loadu_ps(&args->point_y[args->point]);
@@ -52,7 +51,11 @@ void *calc_tx_dis(void *arg) {
 		__m256 z_comp_vec_sq = _mm256_mul_ps(z_comp_vec, z_comp_vec);
 
 		// Sum all XYZ sq
-		__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(x_comp_vec_sq, y_comp_vec_sq), z_comp_vec_sq);
+		__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(
+			x_comp_vec_sq, 
+			y_comp_vec_sq), 
+			z_comp_vec_sq
+		);
 		
 		// Sqrt them
 		__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
@@ -66,6 +69,10 @@ void *calc_tx_dis(void *arg) {
 
 	pthread_exit(NULL);
 }
+
+// add an RX function to handle everywhere up to comment
+
+// Add 2nd RX function to handke below comment
 
 int main (int argc, char **argv) {
 
@@ -191,7 +198,7 @@ int main (int argc, char **argv) {
 	__m256 tx_z_vec = _mm256_set1_ps(tx_z);
 
 	int total_points = sls_t * sls_p * pts_r;
-	int total_simd_blocks = total_simd_blocks / 8;
+	int total_simd_blocks = total_points / 8;
 
 	int blocks_per_thread = total_simd_blocks / NUM_THREADS;
 	int remainder_blocks = total_simd_blocks % NUM_THREADS;
@@ -230,6 +237,7 @@ int main (int argc, char **argv) {
       	}
 	}
 
+	// switch to barrier
 	for (int t = 0; t < NUM_THREADS; t++) {
     	pthread_join(threads[t], NULL);
 	}
@@ -278,6 +286,7 @@ int main (int argc, char **argv) {
 					);
 
 					__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
+					// EVERYTHING ABOVE CAN BE PARALLELIZED WITH TX
 					__m256 dist_tx_vec = _mm256_loadu_ps(&dist_tx[point]);
 					__m256 dists = _mm256_add_ps(sqrt_vec, dist_tx_vec);
 
@@ -305,7 +314,7 @@ int main (int argc, char **argv) {
 					// store it back into image_pos (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
 					_mm256_storeu_ps(image_pos, summed_image_pos_vec);
 
-					// increment // Increment it by 8
+					// increment
 					point += 8;
 					image_pos += 8;
 				}
