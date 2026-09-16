@@ -182,7 +182,7 @@ int main (int argc, char **argv) {
 		__m256 rx_x_vec = _mm256_set1_ps(rx_x[it_rx]);
 		__m256 rx_y_vec = _mm256_set1_ps(rx_y[it_rx]);
 		__m256 rx_z_vec = _mm256_set1_ps(rx_z);
-		__m256 offset_vec = _mm256_set1_ps(offset);
+		__m256i offset_vec = _mm256_set1_epi32(offset); //they're integers 
 
 		// Iterate over entire image space
 		for (it_t = 0; it_t < sls_t; it_t++) {
@@ -203,39 +203,36 @@ int main (int argc, char **argv) {
 					__m256 y_comp_vec_sq = _mm256_mul_ps(y_comp_vec, y_comp_vec);
 					__m256 z_comp_vec_sq = _mm256_mul_ps(z_comp_vec, z_comp_vec);
 
-					// Sum all XYZ sq
-					__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(x_comp_vec_sq, y_comp_vec_sq), z_comp_vec_sq);
-					
-					// Sqrt them
+					// dist = dist_tx[point++] + (float)sqrt(x_comp + y_comp + z_comp); 
+					__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(
+						x_comp_vec_sq, 
+						y_comp_vec_sq), 
+						z_comp_vec_sq
+					);
+
 					__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
-
-					// read dist_tx
 					__m256 dist_tx_vec = _mm256_loadu_ps(&dist_tx[point]);
-
-					// Sum sqrt + dist_tx 
 					__m256 dists = _mm256_add_ps(sqrt_vec, dist_tx_vec);
 
-					// Div dist_tx and idx_const 
+					// index = (int)(dist/idx_const + filter_delay + 0.5); 
 					__m256 divs = _mm256_div_ps(dists, idx_const_vec);
+					__m256i indicies = _mm256_cvttps_epi32(_mm256_add_ps(_mm256_add_ps(
+						divs, 
+						filter_delay_vec), 
+						half_vec
+					)); // then convert to integer vector
 					
-					// Sum div + filter delay + 0.5
-					__m256 indicies = _mm256_add_ps(_mm256_add_ps(divs, filter_delay_vec), half_vec);
+					// *image_pos++ += rx_data[index+offset];
+					__m256i idx_plus_offst = _mm256_add_epi32(indicies, offset_vec);
 
-					// Get rx_data[index + offset]
-					__m256 idx_plus_offst = _mm256_add_ps(indicies, offset_vec);
-
-					// Get all the values of rx_data at idx_plus_offst
-					// Gather is real according to Google???
+					// Get all the values of rx_data at idx_plus_offst, this is real according to google...?
 					__m256 rx_data_vec = _mm256_i32gather_ps(
 						rx_data,
 						idx_plus_offst,
 						4                   // sizeof(float)
 					);
 
-					// Load image_pos_vec
 					__m256 image_pos_vec = _mm256_loadu_ps(image_pos);
-					
-					// Sum image_pos and rx_data
 					__m256 summed_image_pos_vec = _mm256_add_ps(image_pos_vec, rx_data_vec);
 
 					// store it back into image_pos (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
@@ -243,6 +240,7 @@ int main (int argc, char **argv) {
 
 					// increment // Increment it by 8
 					point += 8;
+					image_pos += 8;
 				}
 			}
 		}
