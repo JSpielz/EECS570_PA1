@@ -32,9 +32,8 @@ typedef struct calc_tx_args {
 typedef struct calc_rx_args {
     /* Constants */
     __m256 z_vec;
-    __m256 idx_const_vec;
-    __m256 filter_delay_vec;
-    __m256 half_vec;
+    __m256 idx_const_vec_inv;
+    __m256 fdelay_half_sum;
 
     int start_point;
     int end_point;
@@ -113,6 +112,8 @@ void *calc_rx_dist(void *arg) {
 			__m256 z_comp_vec_sq = _mm256_mul_ps(z_comp_vec, z_comp_vec);
 
 			// dist = dist_tx[point++] + (float)sqrt(x_comp + y_comp + z_comp); 
+
+			// Sum them all 
 			__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(
 				x_comp_vec_sq, 
 				y_comp_vec_sq), 
@@ -120,17 +121,13 @@ void *calc_rx_dist(void *arg) {
 			);
 
 			__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
-
 			__m256 dist_tx_vec = _mm256_loadu_ps(&args->dist_tx[point]);
 			__m256 dists = _mm256_add_ps(sqrt_vec, dist_tx_vec);
 
 			// index = (int)(dist/idx_const + filter_delay + 0.5); 
-			__m256 divs = _mm256_div_ps(dists, args->idx_const_vec);
-			__m256i indicies = _mm256_cvttps_epi32(_mm256_add_ps(_mm256_add_ps(
-				divs, 
-				args->filter_delay_vec), 
-				args->half_vec
-			)); // then convert to integer vector
+			// index = (int)(dist * 1/idx_const + filter_delay+0.5)
+			__m256 divs = _mm256_mul_ps(dists, args->idx_const_vec_inv);
+			__m256i indicies = _mm256_cvttps_epi32(_mm256_add_ps(divs, args->fdelay_half_sum)); // then convert to integer vector
 
 			// *image_pos++ += rx_data[index+offset];
 			__m256i idx_plus_offst = _mm256_add_epi32(indicies, offset_vec);
@@ -203,13 +200,15 @@ int main (int argc, char **argv) {
 	float *dist_tx; // Transmit distance (ie first leg only)
 	float dist; // Full distance
 	const float idx_const = 0.000009625; // Speed of sound and sampling rate, converts dist to index
+	const float idx_const_inv = 1.0f / idx_const;
 	const int filter_delay = 140; // Constant added to index to account filter delay (off by 1 from MATLAB)
 	int index; // Index into transducer data
 
-	const __m256 idx_const_vec = _mm256_set1_ps(idx_const);
-	const __m256 filter_delay_vec = _mm256_set1_ps(filter_delay);
-	const __m256 half_vec = _mm256_set1_ps(0.5f);
+	const __m256 idx_const_vec_inv = _mm256_set1_ps(idx_const_inv); // use the inverse bc div is slow
 	const __m256 rx_z_vec = _mm256_set1_ps(rx_z);
+	const __m256 half_vec = _mm256_set1_ps(0.5f);
+	const __m256 filter_delay_vec = _mm256_set1_ps(filter_delay);
+	const __m256 fdelay_half_sum = _mm256_add_ps(filter_delay_vec, half_vec);
 
     FILE* input;
     FILE* output;
@@ -330,7 +329,7 @@ int main (int argc, char **argv) {
 	start_block = 0;  
 	int xy_size = trans_x * trans_y;                                                       
 	calc_rx_args rx_args[NUM_THREADS];
-	
+
 	for (int t = 0; t < NUM_THREADS; t++) {
 		int blocks_to_process = blocks_per_thread;
 		// split remainders among lower threads
@@ -339,9 +338,8 @@ int main (int argc, char **argv) {
 		}
 
 		rx_args[t].z_vec = rx_z_vec;
-		rx_args[t].idx_const_vec = idx_const_vec;
-		rx_args[t].filter_delay_vec = filter_delay_vec;
-		rx_args[t].half_vec = half_vec;
+		rx_args[t].idx_const_vec_inv = idx_const_vec_inv;
+		rx_args[t].fdelay_half_sum = fdelay_half_sum;
 
 		rx_args[t].start_point = start_block*SIMD_FLOATS;
 		rx_args[t].end_point = rx_args[t].start_point + blocks_to_process * SIMD_FLOATS;

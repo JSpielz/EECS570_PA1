@@ -19,7 +19,7 @@
 
 # ===== CONFIGURATION =====
 # Change this to test different input sizes: 16, 32, or 64
-INPUT_SIZE=16
+INPUT_SIZE=64
 
 # ===== JOB SETUP =====
 echo "=== EECS 570 PA1 Beamforming Job ==="
