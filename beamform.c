@@ -14,7 +14,9 @@
 #include <immintrin.h>
 #include <pthread.h>
 
-const int NUM_THREADS = 36;
+#define RX_BLOCK 32
+
+const int NUM_THREADS = 72; // allocated 36 physical cores but lscpu says we have SMT! 
 const int SIMD_FLOATS = (sizeof(__m256) / sizeof(float));
 
 typedef struct calc_tx_args {
@@ -88,65 +90,108 @@ void *calc_tx_dist(void *arg) {
 
 void *calc_rx_dist(void *arg) {
     calc_rx_args *args = (calc_rx_args *)arg;
-    for (int rx = 0; rx < args->num_rx; rx++) {
 
-        __m256 rx_x_vec = _mm256_set1_ps(args->rx_x[rx]);
-        __m256 rx_y_vec = _mm256_set1_ps(args->rx_y[rx]);
-        int offset = args->initial_offset + rx * args->data_len;
-		__m256i offset_vec = _mm256_set1_epi32(offset);
+    // Process receivers in small blocks to preserve locality
+    for (int rx_base = 0; rx_base < args->num_rx; rx_base += RX_BLOCK) {
 
+        int rx_end = rx_base + RX_BLOCK;
+
+        // Process this thread's assigned points
         for (int point = args->start_point; point < args->end_point; point += 8) {
-            // Load all values (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
-			__m256 point_x_vec = _mm256_loadu_ps(&args->point_x[point]);
-			__m256 point_y_vec = _mm256_loadu_ps(&args->point_y[point]);
-			__m256 point_z_vec = _mm256_loadu_ps(&args->point_z[point]);
 
-			// Do the subtraction
-			__m256 x_comp_vec = _mm256_sub_ps(rx_x_vec, point_x_vec);
-			__m256 y_comp_vec = _mm256_sub_ps(rx_y_vec, point_y_vec);
-			__m256 z_comp_vec = _mm256_sub_ps(args->z_vec, point_z_vec);
+           // Load/Calc these once per block
+            __m256 point_x_vec = _mm256_loadu_ps(&args->point_x[point]);
+            __m256 point_y_vec = _mm256_loadu_ps(&args->point_y[point]);
+            __m256 point_z_vec =  _mm256_loadu_ps(&args->point_z[point]);
 
-			// Square it
-			__m256 x_comp_vec_sq = _mm256_mul_ps(x_comp_vec, x_comp_vec);
-			__m256 y_comp_vec_sq = _mm256_mul_ps(y_comp_vec, y_comp_vec);
-			__m256 z_comp_vec_sq = _mm256_mul_ps(z_comp_vec, z_comp_vec);
+            __m256 dist_tx_vec = _mm256_loadu_ps(&args->dist_tx[point]);
 
-			// dist = dist_tx[point++] + (float)sqrt(x_comp + y_comp + z_comp); 
+            __m256 z_comp_vec = _mm256_sub_ps(args->z_vec, point_z_vec);
+            __m256 z_comp_vec_sq = _mm256_mul_ps(z_comp_vec, z_comp_vec);
 
-			// Sum them all 
-			__m256 sum_vec = _mm256_add_ps(_mm256_add_ps(
-				x_comp_vec_sq, 
-				y_comp_vec_sq), 
-				z_comp_vec_sq
-			);
+            // Load current image and accumulate 
+            __m256 image_accum = _mm256_loadu_ps(&args->image[point]);
 
-			__m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
-			__m256 dist_tx_vec = _mm256_loadu_ps(&args->dist_tx[point]);
-			__m256 dists = _mm256_add_ps(sqrt_vec, dist_tx_vec);
+            int offset = args->initial_offset + rx_base * args->data_len;
+            for (int rx = rx_base; rx < rx_end; rx++) {
 
-			// index = (int)(dist/idx_const + filter_delay + 0.5); 
-			// index = (int)(dist * 1/idx_const + filter_delay+0.5)
-			__m256 divs = _mm256_mul_ps(dists, args->idx_const_vec_inv);
-			__m256i indicies = _mm256_cvttps_epi32(_mm256_add_ps(divs, args->fdelay_half_sum)); // then convert to integer vector
+                __m256 rx_x_vec = _mm256_set1_ps(args->rx_x[rx]);
+                __m256 rx_y_vec = _mm256_set1_ps(args->rx_y[rx]);
+                __m256i offset_vec = _mm256_set1_epi32(offset);
 
-			// *image_pos++ += rx_data[index+offset];
-			__m256i idx_plus_offst = _mm256_add_epi32(indicies, offset_vec);
+                // Calculate rx distance
+                __m256 x_comp_vec = _mm256_sub_ps(rx_x_vec, point_x_vec);
+                __m256 y_comp_vec = _mm256_sub_ps(rx_y_vec, point_y_vec);
+                __m256 x_comp_vec_sq =  _mm256_mul_ps(
+                        x_comp_vec,
+                        x_comp_vec
+                    );
+                __m256 y_comp_vec_sq = _mm256_mul_ps(
+                        y_comp_vec,
+                        y_comp_vec
+                    );
 
-			// Get all the values of rx_data at idx_plus_offst, this is real according to google...?
-			__m256 rx_data_vec = _mm256_i32gather_ps(
-				args->rx_data,
-				idx_plus_offst,
-				4 // sizeof(float)
-			);
+                // x^2 + y^2 + z^2
+                __m256 xy_sum_vec =  _mm256_add_ps(
+                        x_comp_vec_sq,
+                        y_comp_vec_sq
+                    );
+                __m256 sum_vec =  _mm256_add_ps(
+                        xy_sum_vec,
+                        z_comp_vec_sq
+                    );
 
-			//__m256 image_pos_vec = _mm256_loadu_ps(image_pos);
-			__m256 image_vec = _mm256_loadu_ps(&args->image[point]); 
-			__m256 summed_image_vec = _mm256_add_ps(image_vec, rx_data_vec);
+                // dist = tx_dist + rx_dist
+                __m256 sqrt_vec = _mm256_sqrt_ps(sum_vec);
+                __m256 dists = _mm256_add_ps(
+                        sqrt_vec,
+                        dist_tx_vec
+                    );
 
-			// store it back into image_pos (NOTE: MAKE THEM NOT U IF I KNOW THEY'RE ALIGNED?)
-			_mm256_storeu_ps(&args->image[point], summed_image_vec);
+                // index = (int)(dist * (1 / idx_const) + filter_delay + 0.5)
+                __m256 scaled_dist = _mm256_mul_ps(
+                        dists,
+                        args->idx_const_vec_inv
+                    );
+
+                __m256 index_float = _mm256_add_ps(
+                        scaled_dist,
+                        args->fdelay_half_sum
+                    );
+
+                __m256i indices = _mm256_cvttps_epi32(index_float);
+
+                // Add receiver's rx_data offset
+                __m256i idx_plus_offset = _mm256_add_epi32(
+                        indices,
+                        offset_vec
+                    );
+
+                // Gather eight samples
+                __m256 rx_data_vec = _mm256_i32gather_ps(
+                        args->rx_data,
+                        idx_plus_offset,
+                        4
+                    );
+
+                // Accumulate receiver's contribution
+                image_accum = _mm256_add_ps(
+                        image_accum,
+                        rx_data_vec
+                    );
+
+                // Move to next receiver's  block.
+                offset += args->data_len;
+            }
+
+            // Store only once after processing RX_BLOCK receivers
+            _mm256_storeu_ps(
+                &args->image[point],
+                image_accum
+            );
         }
     }
+
     pthread_exit(NULL);
 }
 
@@ -319,7 +364,7 @@ int main (int argc, char **argv) {
       	}
 	}
 
-	// switch to barrier
+	// switch to barrier?
 	for (int t = 0; t < NUM_THREADS; t++) {
     	pthread_join(threads[t], NULL);
 	}
@@ -374,9 +419,9 @@ int main (int argc, char **argv) {
 	/* --------------------------------------------------------------------- */
 
 	/* get elapsed time */
-    	gettimeofday(&tv,NULL);
-    	uint64_t end = tv.tv_sec*(uint64_t)1000000+tv.tv_usec;
-    	uint64_t elapsed = end - start;
+	gettimeofday(&tv,NULL);
+	uint64_t end = tv.tv_sec*(uint64_t)1000000+tv.tv_usec;
+	uint64_t elapsed = end - start;
 
 	printf("@@@ Elapsed time (usec): %lld\n", elapsed);
 	printf("Processing complete.  Preparing output.\n");

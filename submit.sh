@@ -36,7 +36,7 @@ mkdir -p "$SLURM_SUBMIT_DIR/outputs"
 
 # Compile your program
 echo "Compiling beamforming program..."
-gcc -mavx2 -pthread -o beamform beamform.c -lm
+gcc -g -mavx2 -pthread -o beamform beamform.c -lm
 if [ $? -ne 0 ]; then
     echo "ERROR: Compilation failed. Please check your code."
     exit 1
