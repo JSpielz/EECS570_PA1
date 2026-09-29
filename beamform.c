@@ -16,7 +16,7 @@
 
 #define RX_BLOCK 32
 
-const int NUM_THREADS = 72; // allocated 36 physical cores but lscpu says we have SMT! 
+const int NUM_THREADS = 36; // allocated 36 physical cores 
 const int SIMD_FLOATS = (sizeof(__m256) / sizeof(float));
 
 typedef struct calc_tx_args {
